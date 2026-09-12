@@ -5,6 +5,7 @@ import {
   orderLines,
   orderStatusEvents,
   orders,
+  paymentSlips,
 } from "../db/schema";
 import { HttpError } from "../lib/errors";
 import {
@@ -265,6 +266,17 @@ export async function listAdminOrders(statusFilter?: string) {
         .orderBy(desc(orders.createdAt))
     : await db.select().from(orders).orderBy(desc(orders.createdAt));
 
+  const slips = await db
+    .select()
+    .from(paymentSlips)
+    .orderBy(desc(paymentSlips.createdAt));
+  const pendingByOrder = new Map<string, string>();
+  for (const s of slips) {
+    if (s.status === "pending" && !pendingByOrder.has(s.orderId)) {
+      pendingByOrder.set(s.orderId, s.id);
+    }
+  }
+
   return {
     orders: rows.map((o) => ({
       orderId: o.id,
@@ -276,6 +288,7 @@ export async function listAdminOrders(statusFilter?: string) {
       productTotal: Number(o.productTotal),
       depositTotal: Number(o.depositTotal),
       slipRejectReason: o.slipRejectReason,
+      pendingSlipId: pendingByOrder.get(o.id) ?? null,
       createdAt: o.createdAt.toISOString(),
       updatedAt: o.updatedAt.toISOString(),
     })),
