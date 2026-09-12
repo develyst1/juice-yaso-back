@@ -1,6 +1,6 @@
 # juice-yaso-back
 
-Juice Yaso v1 API — Bun + Hono + TypeScript + PostgreSQL + Drizzle ORM.
+Juice Yaso API v1.1 — Bun + Hono + TypeScript + PostgreSQL + Drizzle ORM.
 
 Implements locked contracts from [juice-yaso-spec](https://github.com/develyst1/juice-yaso-spec):
 `docs/contracts/api.md`, `docs/contracts/db.md`, `docs/statuses.md`, `docs/domain.md`.
@@ -102,4 +102,4 @@ Uploaded slips / QR images are stored under `uploads/` (gitignored). Served at `
 
 ## Non-goals (v1)
 
-No UI, no customer auth, no shipping, no auto-refund, no invented endpoints/tables/statuses.
+No UI, no customer auth, no shipping, no auto-refund, no invented endpoints/tables/statuses. POST /orders uses crates[].fills[] (v1.1); legacy lines rejected.
