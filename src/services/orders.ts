@@ -1,8 +1,9 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db";
 import {
   flavors,
-  orderLines,
+  orderCrateFills,
+  orderCrates,
   orderStatusEvents,
   orders,
   paymentSlips,
@@ -26,30 +27,84 @@ import {
 import { getPaymentChannel, getPricing } from "./catalog";
 import { transitionOrder } from "./status";
 
-export type CreateOrderLineInput = {
-  crateSize: number;
-  quantity: number;
+const PHONE_RE = /^0\d{9}$/;
+
+export type CreateOrderFillInput = {
   flavor: string;
+  cups: number;
+};
+
+export type CreateOrderCrateInput = {
+  crateSize: number;
+  fills: CreateOrderFillInput[];
 };
 
 export type CreateOrderInput = {
   customerName: string;
   customerPhone: string;
-  lines: CreateOrderLineInput[];
+  crates: CreateOrderCrateInput[];
 };
+
+export type CrateView = {
+  crateSize: number;
+  deposit: number;
+  fills: { flavor: string; cups: number }[];
+};
+
+async function loadCratesForOrders(
+  orderIds: string[],
+): Promise<Map<string, CrateView[]>> {
+  const result = new Map<string, CrateView[]>();
+  if (orderIds.length === 0) return result;
+
+  const crateRows = await db
+    .select()
+    .from(orderCrates)
+    .where(inArray(orderCrates.orderId, orderIds));
+
+  const crateIds = crateRows.map((c) => c.id);
+  const fillRows =
+    crateIds.length === 0
+      ? []
+      : await db
+          .select()
+          .from(orderCrateFills)
+          .where(inArray(orderCrateFills.crateId, crateIds));
+
+  const fillsByCrate = new Map<string, { flavor: string; cups: number }[]>();
+  for (const f of fillRows) {
+    const list = fillsByCrate.get(f.crateId) ?? [];
+    list.push({ flavor: f.flavorCode, cups: f.cups });
+    fillsByCrate.set(f.crateId, list);
+  }
+
+  for (const c of crateRows) {
+    const list = result.get(c.orderId) ?? [];
+    list.push({
+      crateSize: c.crateSize,
+      deposit: Number(c.lineDeposit),
+      fills: fillsByCrate.get(c.id) ?? [],
+    });
+    result.set(c.orderId, list);
+  }
+  return result;
+}
 
 export async function createOrder(input: CreateOrderInput) {
   const customerName = input.customerName?.trim() ?? "";
   const customerPhone = input.customerPhone?.trim() ?? "";
-  if (!customerName || !customerPhone) {
+  if (!customerName) {
+    throw new HttpError(400, "customerName must be non-empty", "VALIDATION");
+  }
+  if (!PHONE_RE.test(customerPhone)) {
     throw new HttpError(
       400,
-      "customerName and customerPhone are required",
+      "customerPhone must match ^0\\d{9}$ (10 digits starting with 0)",
       "VALIDATION",
     );
   }
-  if (!input.lines || input.lines.length < 1) {
-    throw new HttpError(400, "At least one line is required", "VALIDATION");
+  if (!input.crates || input.crates.length < 1) {
+    throw new HttpError(400, "At least one crate is required", "VALIDATION");
   }
 
   const flavorRows = await db.select().from(flavors);
@@ -57,42 +112,76 @@ export async function createOrder(input: CreateOrderInput) {
 
   const parsed: {
     crateSize: CrateSize;
-    quantity: number;
-    flavorCode: string;
-    lineCups: number;
     lineDeposit: number;
+    fills: { flavorCode: string; cups: number }[];
   }[] = [];
 
-  for (const line of input.lines) {
-    if (!isCrateSize(line.crateSize)) {
+  for (const crate of input.crates) {
+    if (!isCrateSize(crate.crateSize)) {
       throw new HttpError(
         400,
-        `Invalid crateSize: ${line.crateSize}`,
+        `Invalid crateSize: ${crate.crateSize}`,
         "VALIDATION",
       );
     }
-    if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
-      throw new HttpError(400, "quantity must be an integer > 0", "VALIDATION");
+    if (!Array.isArray(crate.fills) || crate.fills.length < 1) {
+      throw new HttpError(
+        400,
+        "Each crate must have at least one fill",
+        "VALIDATION",
+      );
     }
-    const flavorCode = normalizeFlavor(line.flavor);
-    if (!flavorCode || !known.has(flavorCode)) {
-      throw new HttpError(400, `Unknown flavor: ${line.flavor}`, "VALIDATION");
+
+    const seenFlavors = new Set<string>();
+    const fills: { flavorCode: string; cups: number }[] = [];
+    let cupsSum = 0;
+
+    for (const fill of crate.fills) {
+      if (!Number.isInteger(fill.cups) || fill.cups <= 0) {
+        throw new HttpError(
+          400,
+          "fills.cups must be an integer > 0",
+          "VALIDATION",
+        );
+      }
+      const flavorCode = normalizeFlavor(fill.flavor);
+      if (!flavorCode || !known.has(flavorCode)) {
+        throw new HttpError(
+          400,
+          `Unknown flavor: ${fill.flavor}`,
+          "VALIDATION",
+        );
+      }
+      if (seenFlavors.has(flavorCode)) {
+        throw new HttpError(
+          400,
+          `Duplicate flavor in crate: ${flavorCode}`,
+          "VALIDATION",
+        );
+      }
+      seenFlavors.add(flavorCode);
+      fills.push({ flavorCode, cups: fill.cups });
+      cupsSum += fill.cups;
     }
-    const lineCups = line.crateSize * line.quantity;
-    const lineDeposit = DEPOSIT_BY_SIZE[line.crateSize] * line.quantity;
+
+    if (cupsSum !== crate.crateSize) {
+      throw new HttpError(
+        400,
+        `Sum of fills.cups (${cupsSum}) must equal crateSize (${crate.crateSize})`,
+        "VALIDATION",
+      );
+    }
+
     parsed.push({
-      crateSize: line.crateSize,
-      quantity: line.quantity,
-      flavorCode,
-      lineCups,
-      lineDeposit,
+      crateSize: crate.crateSize,
+      lineDeposit: DEPOSIT_BY_SIZE[crate.crateSize],
+      fills,
     });
   }
 
-  const cupsTotal = parsed.reduce((s, l) => s + l.lineCups, 0);
-  const depositTotal = parsed.reduce((s, l) => s + l.lineDeposit, 0);
+  const cupsTotal = parsed.reduce((s, c) => s + c.crateSize, 0);
+  const depositTotal = parsed.reduce((s, c) => s + c.lineDeposit, 0);
 
-  // Snapshot current pricing — config changes affect new orders only
   const pricing = await getPricing();
   const unitPriceApplied = unitPriceForCups(cupsTotal, pricing);
   const productTotal = cupsTotal * unitPriceApplied;
@@ -128,16 +217,25 @@ export async function createOrder(input: CreateOrderInput) {
 
   if (!order) throw new HttpError(500, "Failed to create order");
 
-  await db.insert(orderLines).values(
-    parsed.map((l) => ({
-      orderId: order.id,
-      crateSize: l.crateSize,
-      quantity: l.quantity,
-      flavorCode: l.flavorCode,
-      lineCups: l.lineCups,
-      lineDeposit: money(l.lineDeposit),
-    })),
-  );
+  for (const crate of parsed) {
+    const [crateRow] = await db
+      .insert(orderCrates)
+      .values({
+        orderId: order.id,
+        crateSize: crate.crateSize,
+        lineDeposit: money(crate.lineDeposit),
+      })
+      .returning();
+    if (!crateRow) throw new HttpError(500, "Failed to create order crate");
+
+    await db.insert(orderCrateFills).values(
+      crate.fills.map((f) => ({
+        crateId: crateRow.id,
+        flavorCode: f.flavorCode,
+        cups: f.cups,
+      })),
+    );
+  }
 
   await db.insert(orderStatusEvents).values({
     orderId: order.id,
@@ -167,10 +265,8 @@ export async function getOrderByQueueCode(queueCode: string) {
   const order = rows[0];
   if (!order) throw new HttpError(404, "Order not found", "NOT_FOUND");
 
-  const lines = await db
-    .select()
-    .from(orderLines)
-    .where(eq(orderLines.orderId, order.id));
+  const cratesByOrder = await loadCratesForOrders([order.id]);
+  const crates = cratesByOrder.get(order.id) ?? [];
 
   const status = order.status as OrderStatus;
   const showPayment =
@@ -189,13 +285,7 @@ export async function getOrderByQueueCode(queueCode: string) {
     depositTotal: Number(order.depositTotal),
     unitPriceApplied: Number(order.unitPriceApplied),
     slipRejectReason: order.slipRejectReason,
-    lines: lines.map((l) => ({
-      crateSize: l.crateSize,
-      quantity: l.quantity,
-      flavor: l.flavorCode,
-      lineCups: l.lineCups,
-      lineDeposit: Number(l.lineDeposit),
-    })),
+    crates,
     ...(paymentChannel ? { paymentChannel } : {}),
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
@@ -277,6 +367,8 @@ export async function listAdminOrders(statusFilter?: string) {
     }
   }
 
+  const cratesByOrder = await loadCratesForOrders(rows.map((o) => o.id));
+
   return {
     orders: rows.map((o) => ({
       orderId: o.id,
@@ -289,6 +381,7 @@ export async function listAdminOrders(statusFilter?: string) {
       depositTotal: Number(o.depositTotal),
       slipRejectReason: o.slipRejectReason,
       pendingSlipId: pendingByOrder.get(o.id) ?? null,
+      crates: cratesByOrder.get(o.id) ?? [],
       createdAt: o.createdAt.toISOString(),
       updatedAt: o.updatedAt.toISOString(),
     })),

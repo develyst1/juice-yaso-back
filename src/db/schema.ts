@@ -7,6 +7,7 @@ import {
   uuid,
   uniqueIndex,
   index,
+  unique,
 } from "drizzle-orm/pg-core";
 
 export const flavors = pgTable("flavors", {
@@ -72,6 +73,7 @@ export const orders = pgTable(
   ],
 );
 
+/** @deprecated v1.0 — unused for new orders (v1.1 uses order_crates + order_crate_fills) */
 export const orderLines = pgTable("order_lines", {
   id: uuid("id").primaryKey().defaultRandom(),
   orderId: uuid("order_id")
@@ -85,6 +87,30 @@ export const orderLines = pgTable("order_lines", {
   lineCups: integer("line_cups").notNull(),
   lineDeposit: numeric("line_deposit", { precision: 12, scale: 2 }).notNull(),
 });
+
+export const orderCrates = pgTable("order_crates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orderId: uuid("order_id")
+    .notNull()
+    .references(() => orders.id),
+  crateSize: integer("crate_size").notNull(),
+  lineDeposit: numeric("line_deposit", { precision: 12, scale: 2 }).notNull(),
+});
+
+export const orderCrateFills = pgTable(
+  "order_crate_fills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    crateId: uuid("crate_id")
+      .notNull()
+      .references(() => orderCrates.id),
+    flavorCode: text("flavor_code")
+      .notNull()
+      .references(() => flavors.code),
+    cups: integer("cups").notNull(),
+  },
+  (t) => [unique("order_crate_fills_crate_flavor_uidx").on(t.crateId, t.flavorCode)],
+);
 
 export const paymentSlips = pgTable(
   "payment_slips",

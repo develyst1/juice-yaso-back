@@ -1,6 +1,7 @@
 /**
  * Happy-path smoke against a running local server + DB.
  * Usage: bun run smoke  (expects server on PORT, default 3000)
+ * API v1.1 — crates[{crateSize, fills[{flavor,cups}]}]
  */
 const BASE = `http://127.0.0.1:${process.env.PORT ?? 3000}`;
 const ADMIN = process.env.ADMIN_TOKEN ?? "dev-admin-token";
@@ -27,7 +28,24 @@ async function main() {
   assert(Array.isArray(catalog.flavors) && (catalog.flavors as unknown[]).length === 5, "5 flavors");
   assert((catalog.pricing as { basePricePerCup: number }).basePricePerCup === 5, "base price 5");
 
-  // ≤100 cups → unit 5
+  // Reject legacy lines payload
+  const legacy = await fetch(`${BASE}/api/v1/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      customerName: "Legacy",
+      customerPhone: "0812345678",
+      lines: [{ crateSize: 30, quantity: 1, flavor: "orange" }],
+    }),
+  });
+  assert(legacy.status === 400, "legacy lines → 400");
+  const legacyBody = (await legacy.json()) as { error?: string };
+  assert(
+    typeof legacyBody.error === "string" && legacyBody.error.includes("lines"),
+    "legacy error mentions lines",
+  );
+
+  // ≤100 cups → unit 5; mixed flavors in one crate
   const orderA = await json(
     await fetch(`${BASE}/api/v1/orders`, {
       method: "POST",
@@ -35,9 +53,18 @@ async function main() {
       body: JSON.stringify({
         customerName: "Smoke Test",
         customerPhone: "0812345678",
-        lines: [
-          { crateSize: 50, quantity: 1, flavor: "orange" },
-          { crateSize: 30, quantity: 1, flavor: "องุ่น" },
+        crates: [
+          {
+            crateSize: 50,
+            fills: [
+              { flavor: "orange", cups: 30 },
+              { flavor: "lychee", cups: 20 },
+            ],
+          },
+          {
+            crateSize: 30,
+            fills: [{ flavor: "องุ่น", cups: 30 }],
+          },
         ],
       }),
     }),
@@ -48,6 +75,12 @@ async function main() {
   assert(orderA.depositTotal === 140, `deposit 140 got ${orderA.depositTotal}`);
   const queueCode = orderA.queueCode as string;
 
+  const q0 = await json(await fetch(`${BASE}/api/v1/queue/${queueCode}`));
+  assert(Array.isArray(q0.crates) && (q0.crates as unknown[]).length === 2, "queue returns crates");
+  const crate0 = (q0.crates as { crateSize: number; deposit: number; fills: unknown[] }[])[0];
+  assert(crate0.crateSize === 50 && crate0.deposit === 90, "first crate size/deposit");
+  assert(crate0.fills.length === 2, "mixed fills");
+
   // >100 cups → 4.5
   const orderB = await json(
     await fetch(`${BASE}/api/v1/orders`, {
@@ -56,7 +89,10 @@ async function main() {
       body: JSON.stringify({
         customerName: "Bulk",
         customerPhone: "0899999999",
-        lines: [{ crateSize: 100, quantity: 2, flavor: "cocoa" }],
+        crates: [
+          { crateSize: 100, fills: [{ flavor: "cocoa", cups: 100 }] },
+          { crateSize: 100, fills: [{ flavor: "cocoa", cups: 100 }] },
+        ],
       }),
     }),
   );
@@ -155,7 +191,7 @@ async function main() {
       body: JSON.stringify({
         customerName: "Cancel Me",
         customerPhone: "0800000000",
-        lines: [{ crateSize: 30, quantity: 1, flavor: "lychee" }],
+        crates: [{ crateSize: 30, fills: [{ flavor: "lychee", cups: 30 }] }],
       }),
     }),
   );
@@ -165,9 +201,32 @@ async function main() {
     }),
   );
 
+  // Admin list includes crates + pendingSlipId
+  const adminList = await json(
+    await fetch(`${BASE}/api/v1/admin/orders`, {
+      headers: { "X-Admin-Token": ADMIN },
+    }),
+  );
+  assert(Array.isArray(adminList.orders), "admin orders list");
+  const listed = (adminList.orders as { crates?: unknown; pendingSlipId?: unknown }[])[0];
+  assert(listed && Array.isArray(listed.crates), "admin list has crates");
+  assert("pendingSlipId" in listed, "admin list has pendingSlipId");
+
   // Admin without token
   const unauth = await fetch(`${BASE}/api/v1/admin/orders`);
   assert(unauth.status === 401, "admin requires token");
+
+  // Phone validation
+  const badPhone = await fetch(`${BASE}/api/v1/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      customerName: "Bad Phone",
+      customerPhone: "081-234-5678",
+      crates: [{ crateSize: 30, fills: [{ flavor: "orange", cups: 30 }] }],
+    }),
+  });
+  assert(badPhone.status === 400, "non-digit phone → 400");
 
   console.log("SMOKE OK");
 }
