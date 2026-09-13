@@ -11,6 +11,7 @@
     "db:migrate": "bun run src/db/migrate.ts",
     "db:seed": "bun run src/db/seed.ts",
     "db:setup": "bun run db:migrate && bun run db:seed",
+    "build": "bun build src/index.ts --compile --minify --outfile dist/juice-yaso-back",
     "smoke": "bun run scripts/smoke.ts"
   },
   "dependencies": {

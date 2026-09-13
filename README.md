@@ -46,8 +46,8 @@ Deposit map (domain lock, not a config table): `30→50`, `50→90`, `60→90`, 
 
 ```bash
 bun run dev
-# → http://localhost:3000
-curl http://localhost:3000/health
+# → http://localhost:4013
+curl http://localhost:4013/health
 ```
 
 ### 5. Smoke (optional)

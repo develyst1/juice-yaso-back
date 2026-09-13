@@ -1,9 +1,9 @@
 /**
  * Happy-path smoke against a running local server + DB.
- * Usage: bun run smoke  (expects server on PORT, default 3000)
+ * Usage: bun run smoke  (expects server on PORT, default 4013)
  * API v1.1 — crates[{crateSize, fills[{flavor,cups}]}]
  */
-const BASE = `http://127.0.0.1:${process.env.PORT ?? 3000}`;
+const BASE = `http://127.0.0.1:${process.env.PORT ?? 4013}`;
 const ADMIN = process.env.ADMIN_TOKEN ?? "dev-admin-token";
 
 function assert(cond: unknown, msg: string): asserts cond {
